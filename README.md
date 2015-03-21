@@ -76,4 +76,7 @@ Remove all entries
 $ dokku hosts:removeall myapp
 ```
 
+TODO
+----
 
+* Set configured hosts to every created app container, not just the ones existing after a deploy [#1](/../../issues/1)
