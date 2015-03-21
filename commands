@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+set -eo pipefail; [[ $DOKKU_TRACE ]] && set -x
+
+function info() {
+  local msg="$1"
+  echo "-----> $msg"
+}
+
+function failure() {
+  local msg="$1"
+  echo "FAILURE: $msg"
+  exit 1
+}
+
+function check_hosts_dir() {
+  if [ -z $HOSTS_DIR ]; then
+    failure "Call init_vars first (HOSTS_DIR not set)"
+  fi
+  if [ ! -d $HOSTS_DIR ]; then
+    mkdir -p $HOSTS_DIR
+    chown -R dokku: $HOSTS_DIR
+  fi
+}
+
+function init_vars() {
+  HOSTS_DIR="$DOKKU_ROOT/.hosts"
+  check_hosts_dir
+}
+
+function save_hosts() {
+  local app_path="$HOSTS_DIR/$APP"
+  if [ ! -d $app_path ]; then
+    mkdir $app_path
+  fi
+  local hostname_path="$app_path/$HOSTNAME"
+  touch "$hostname_path"
+  echo "$IP" > "$hostname_path"
+}
+
+function load_hosts() {
+  local app_path="$HOSTS_DIR/$APP"
+  if [ -d $app_path ]; then
+    for HOSTNAME in $(ls "$app_path"); do
+      local ip=$(cat "$app_path/$HOSTNAME")
+      dokku hosts:add $APP $ip $HOSTNAME
+    done
+  fi
+}
+
+function remove_host() {
+  local app_path="$HOSTS_DIR/$APP"
+  if [ -d $app_path ] && [ -f $app_path/$HOSTNAME ]; then
+    rm $app_path/$HOSTNAME
+  fi
+}
+
+function remove_hosts() {
+  local app_path="$HOSTS_DIR/$APP"
+  if [ -d $app_path ]; then
+    rm -rf $app_path
+  fi
+}
+
+case "$1" in
+  hosts:list)
+    echo
+    APP="$2"
+    if [ -z "$APP" ]; then
+      failure "Missing parameters. <app>"
+    fi
+    info "Hosts set for $APP"
+
+    for CONTAINER in $(docker ps -a|grep "$APP"|awk '{print $1}'); do
+      docker exec "$CONTAINER" sh -c "grep '# hosts-plugin' etc/hosts"|awk '{ print $1, $2 }'
+      break
+    done  
+    ;;
+
+  hosts:add)
+    echo
+    APP="$2"
+    IP="$3"
+    HOSTNAME="$4"
+    if [ -z "$APP" ] || [ -z "$IP" ] || [ -z "$HOSTNAME" ]; then
+      failure "Missing parameters. <app> <ip> <hostname>"
+    fi
+    info "Adding $IP $HOSTNAME to $APP"
+
+    for CONTAINER in $(docker ps -a|grep "$APP"|awk '{print $1}'); do
+      ENTRY="$IP $HOSTNAME"
+      if ! docker exec "$CONTAINER" cat etc/hosts|grep -q "$ENTRY"; then
+        docker exec "$CONTAINER" sh -c "echo '$ENTRY  # hosts-plugin' >> etc/hosts"
+      fi
+    done
+    init_vars
+    save_hosts
+    ;;
+
+  hosts:remove)
+    echo
+    APP="$2"
+    HOSTNAME="$3"
+    if [ -z "$APP" ] || [ -z "$HOSTNAME" ]; then
+      failure "Missing parameters. <app> <hostname>"
+    fi
+    info "Removing host $HOSTNAME set for $APP"
+
+    TMP_HOSTS=$(mktemp)
+    for CONTAINER in $(docker ps -a|grep "$APP"|awk '{print $1}'); do
+      docker exec "$CONTAINER" sh -c "cat etc/hosts" > "$TMP_HOSTS"
+      sed -i "/$HOSTNAME.*hosts-plugin/d" "$TMP_HOSTS"
+      docker exec -i "$CONTAINER" sh -c "cat > etc/hosts" < "$TMP_HOSTS"
+    done
+    rm "$TMP_HOSTS"
+    init_vars
+    remove_host
+  ;;
+
+  hosts:removeall)
+    echo
+    APP="$2"
+    if [ -z "$APP" ]; then
+      failure "Missing parameters. <app>"
+    fi
+    info "Removing hosts set for $APP"
+
+    TMP_HOSTS=$(mktemp)
+    for CONTAINER in $(docker ps -a|grep "$APP"|awk '{print $1}'); do
+      docker exec "$CONTAINER" sh -c "cat etc/hosts" > "$TMP_HOSTS"
+      sed -i '/hosts-plugin/d' "$TMP_HOSTS"
+      docker exec -i "$CONTAINER" sh -c "cat > etc/hosts" < "$TMP_HOSTS"
+    done
+    rm "$TMP_HOSTS"
+    init_vars
+    remove_hosts
+  ;;
+
+  hosts:re-add)
+    # this is supposed to be called only during post-deploy
+    APP="$2"
+    init_vars
+    load_hosts
+  ;;
+
+  help)
+    cat && cat << EOF
+    hosts:list <app>                                Lists all custom hosts set for <app>
+    hosts:add <app> <ip> <hostname>                 Sets <ip> and <hostname> for <app>
+    hosts:remove <app> <hostname>                   Removes <hostname> from <app>
+    hosts:removeall <app>                           Removes all hosts set for <app>
+EOF
+  ;;
+
+  *)
+    exit $DOKKU_NOT_IMPLEMENTED_EXIT
+    ;;
+
+esac
